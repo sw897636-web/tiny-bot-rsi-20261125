@@ -9,10 +9,10 @@
 // actually left after the buys already decided in this reply (sells never
 // fund same-bar buys — their proceeds land at the next open), so a bar
 // where several symbols trigger at once cannot over-commit cash.
-// RSI is Wilder's: the first average gain/loss are the means of the first
-// 14 closes' changes, then each step keeps 13/14 of the old average and
-// adds 1/14 of the newest change. RSI = 100 * gain / (gain + loss),
-// 50 when nothing moved. A symbol needs 15 closes before its first RSI.
+// RSI is the rolling-window form: average gain and average loss are the
+// means of the up / down moves over the last 14 closes' changes, recomputed
+// on every bar. RSI = 100 * gain / (gain + loss), 50 when nothing moved.
+// A symbol needs 15 closes before its first RSI.
 
 import { BPS, runBars, type Bar, type BarsState, type BuyInput, type SellInput } from './vendor/makefun-bars.ts';
 
@@ -28,10 +28,8 @@ const MAX_SLIPPAGE_BPS = 10000;
 interface RsiSeries {
   /** Last close seen, null before the first bar. */
   last: number | null;
-  /** The first RSI_PERIOD changes, while the averages are not set yet. */
-  firstChanges: number[];
-  avgGain: number | null;
-  avgLoss: number | null;
+  /** The last RSI_PERIOD closes' changes, oldest first. */
+  changes: number[];
 }
 
 const series = new Map<string, RsiSeries>();
@@ -39,38 +37,29 @@ const series = new Map<string, RsiSeries>();
 function pushClose(bar: Bar): void {
   let s = series.get(bar.symbol);
   if (s === undefined) {
-    s = { last: null, firstChanges: [], avgGain: null, avgLoss: null };
+    s = { last: null, changes: [] };
     series.set(bar.symbol, s);
   }
   const close = Number(bar.c);
   if (s.last !== null) {
-    const change = close - s.last;
-    if (s.avgGain === null || s.avgLoss === null) {
-      s.firstChanges.push(change);
-      if (s.firstChanges.length === RSI_PERIOD) {
-        let gain = 0;
-        let loss = 0;
-        for (const d of s.firstChanges) {
-          if (d > 0) gain += d;
-          else loss -= d;
-        }
-        s.avgGain = gain / RSI_PERIOD;
-        s.avgLoss = loss / RSI_PERIOD;
-      }
-    } else {
-      const up = change > 0 ? change : 0;
-      const down = change < 0 ? -change : 0;
-      s.avgGain = (s.avgGain * (RSI_PERIOD - 1) + up) / RSI_PERIOD;
-      s.avgLoss = (s.avgLoss * (RSI_PERIOD - 1) + down) / RSI_PERIOD;
-    }
+    s.changes.push(close - s.last);
+    if (s.changes.length > RSI_PERIOD) s.changes.shift();
   }
   s.last = close;
 }
 
 function rsi(s: RsiSeries): number | null {
-  if (s.avgGain === null || s.avgLoss === null) return null;
-  const moved = s.avgGain + s.avgLoss;
-  return moved === 0 ? 50 : (100 * s.avgGain) / moved;
+  if (s.changes.length < RSI_PERIOD) return null;
+  let gain = 0;
+  let loss = 0;
+  for (const d of s.changes) {
+    if (d > 0) gain += d;
+    else loss -= d;
+  }
+  gain /= RSI_PERIOD;
+  loss /= RSI_PERIOD;
+  const moved = gain + loss;
+  return moved === 0 ? 50 : (100 * gain) / moved;
 }
 
 await runBars({
